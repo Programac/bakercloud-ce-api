@@ -610,55 +610,55 @@ $app->post('/confirmpurchaseandroid/:app_id/:user_id', function ($app_id, $user_
 			$receiptConfirmationJSON = null;
 			$didVerify = verifyReceiptGooglePlay($receiptdata, $receiptdataBase64, $app_id, $user_id, $signatureBase64, $type, $receiptConfirmationJSON);
 	
-			if( $didVerify != 0 && $receiptConfirmationJSON != null ) {
+			if( $didVerify == 1 ) {
 			
-		 	$receiptJSON = json_decode($receiptdata);
-
-			$sql = "INSERT IGNORE INTO RECEIPTS (PLATFORM, APP_ID, PRODUCT_ID, TYPE, TRANSACTION_ID, USER_ID, PURCHASE_DATE, 
-							BASE64_RECEIPT, BASE64_ANDROID_SIGNATURE, ANDROID_DEVELOPER_PAYLOAD, ANDROID_PURCHASE_TOKEN) 
-							VALUES (:app_platform, :app_id, :product_id, :type, :transaction_id, :user_id, :purchase_date, :base64_receipt, :base64_android_signature, :android_developer_payload, :android_purchase_token)";
-			try {
-				$quantity = "1";
-				$objNull = null;
-				$platform = "2";
-				
-				$stmt = $db->prepare($sql);
-				$stmt->bindParam("app_platform", $platform);
-				$stmt->bindParam("app_id", $app_id);
-// 				$stmt->bindParam("quantity", $quantity); // test it!
-				$stmt->bindParam("product_id", $receiptJSON->productId);
-				$stmt->bindParam("type", $type);
-				$stmt->bindParam("transaction_id", $receiptJSON->orderId);
-				$stmt->bindParam("user_id", $user_id);
-				$stmt->bindParam("purchase_date", gmdate("Y-m-d\TH:i:s\Z", $receiptJSON->purchaseTime/1000.0));
-// 				$stmt->bindParam("original_transaction_id", $objNull);
-// 				$stmt->bindParam("original_purchase_date", $objNull);
-// 				$stmt->bindParam("app_item_id", $objNull);
-// 				$stmt->bindParam("version_external_identifier", $objNull);
-// 				$stmt->bindParam("bid", $objNull);
-// 				$stmt->bindParam("bvrs", $objNull);
-				$stmt->bindParam("base64_receipt", $receiptdata);
-				$stmt->bindParam("base64_android_signature", $signatureBase64);
-				$stmt->bindParam("android_developer_payload", $receiptJSON->developerPayload);
-				$stmt->bindParam("android_purchase_token", $receiptJSON->purchaseToken);
-				$r = $stmt->execute();
-
-				// If successful, record the user's purchase
-
-				if($type == 'auto-renewable-subscription'){
-					markIssuesAsPurchasedAndroid($receiptConfirmationJSON,$app_id,$user_id);
-				}else if($type == 'issue'){
-					markIssueAsPurchased($receiptJSON->productId, $app_id, $user_id);				
-				}else if($type == 'free-subscription'){
-					// Nothing to do, as the server assumes free subscriptions don't need to be handled in this way			
-				}				
-
-				logAnalyticMetric(AnalyticType::ApiInteraction,1,NULL,$app_id,$user_id);
-		}
-		catch(PDOException $e) {
-			logMessage(LogType::Error, $e->getMessage());
-			echo '{"error":{"text":"' . $e->getMessage() . '"}}';
-		}
+				$receiptJSON = json_decode($receiptdata);
+	
+				$sql = "INSERT IGNORE INTO RECEIPTS (PLATFORM, APP_ID, PRODUCT_ID, TYPE, TRANSACTION_ID, USER_ID, PURCHASE_DATE, 
+								BASE64_RECEIPT, BASE64_ANDROID_SIGNATURE, ANDROID_DEVELOPER_PAYLOAD, ANDROID_PURCHASE_TOKEN) 
+								VALUES (:app_platform, :app_id, :product_id, :type, :transaction_id, :user_id, :purchase_date, :base64_receipt, :base64_android_signature, :android_developer_payload, :android_purchase_token)";
+				try {
+					$quantity = "1";
+					$objNull = null;
+					$platform = "2";
+					
+					$stmt = $db->prepare($sql);
+					$stmt->bindParam("app_platform", $platform);
+					$stmt->bindParam("app_id", $app_id);
+	// 				$stmt->bindParam("quantity", $quantity); // test it!
+					$stmt->bindParam("product_id", $receiptJSON->productId);
+					$stmt->bindParam("type", $type);
+					$stmt->bindParam("transaction_id", $receiptJSON->orderId);
+					$stmt->bindParam("user_id", $user_id);
+					$stmt->bindParam("purchase_date", gmdate("Y-m-d\TH:i:s\Z", $receiptJSON->purchaseTime/1000.0));
+	// 				$stmt->bindParam("original_transaction_id", $objNull);
+	// 				$stmt->bindParam("original_purchase_date", $objNull);
+	// 				$stmt->bindParam("app_item_id", $objNull);
+	// 				$stmt->bindParam("version_external_identifier", $objNull);
+	// 				$stmt->bindParam("bid", $objNull);
+	// 				$stmt->bindParam("bvrs", $objNull);
+					$stmt->bindParam("base64_receipt", $receiptdata);
+					$stmt->bindParam("base64_android_signature", $signatureBase64);
+					$stmt->bindParam("android_developer_payload", $receiptJSON->developerPayload);
+					$stmt->bindParam("android_purchase_token", $receiptJSON->purchaseToken);
+					$stmt->execute();
+	
+					// If successful, record the user's purchase
+	
+					if($type == 'auto-renewable-subscription'){
+						markIssuesAsPurchasedAndroid($receiptConfirmationJSON,$app_id,$user_id);
+					}else if($type == 'issue'){
+						markIssueAsPurchased($receiptJSON->productId, $app_id, $user_id);				
+					}else if($type == 'free-subscription'){
+						// Nothing to do, as the server assumes free subscriptions don't need to be handled in this way			
+					}				
+	
+					logAnalyticMetric(AnalyticType::ApiInteraction,1,NULL,$app_id,$user_id);
+			}
+			catch(PDOException $e) {
+				logMessage(LogType::Error, $e->getMessage());
+				echo '{"error":{"text":"' . $e->getMessage() . '"}}';
+			}
 		}
 	}
 	catch( Exception $e ) {
