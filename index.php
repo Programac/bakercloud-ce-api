@@ -1,8 +1,14 @@
 <?php
+error_reporting(E_ALL);
+
 require 'Slim/Slim.php';
 
 // Pimple Dependency Injection Container
 require_once 'Pimple.php';
+
+// Google client
+require_once 'Google/autoload.php';
+//phpinfo();
 
 \Slim\Slim::registerAutoloader();
 
@@ -40,9 +46,9 @@ $apiVersion = '1.1.1';
 // ************************************************************
 $dbContainer['db.options'] = array(
 	'host' => 'localhost',						// CONFIGURE TO YOUR DB HOSTNAME					
-	'username' => 'bakerc_ce',					// CONFIGURE TO YOUR DB USERNAME		
-	'password' => 'baker',						// CONFIGURE TO YOUR DB USERNAME'S PASSWORD
-	'dbname' => 'bakerc_cloudce'				// CONFIGURE TO YOUR DB INSTANCE NAME
+	'username' => 'baker',					// CONFIGURE TO YOUR DB USERNAME		
+	'password' => 'Baker2014',						// CONFIGURE TO YOUR DB USERNAME'S PASSWORD
+	'dbname' => 'baker'				// CONFIGURE TO YOUR DB INSTANCE NAME
 );
 //*************************************************************
 
@@ -188,9 +194,62 @@ $app->get('/debuginformation/:app_id', function ($app_id)
 		echo '<BR>iTunes Production Level: ' . getiTunesProductionLevel($app_id);
 		echo '<BR>iTunes Caching Duration: ' . getiTunesCachingDuration($app_id);
 	}
-	catch(Exception $e) {
+	catch(PDOException $e) {
 	}
 });
+
+function getDeviceTypeFromEnvironment($env)
+{
+	$deviceType = "tablet";
+ 	$queryString = $env["QUERY_STRING"];
+	if( isset($queryString) ) {
+		$queryParams = explode("&", $queryString);
+		foreach( $queryParams as $query ) {
+			$varAndValue = explode("=", $query);
+			if( sizeof($varAndValue) == 2 ) {
+				$key = $varAndValue[0];
+ 				$value = $varAndValue[1];
+ 				if( $key == "devicetype" || $key == "deviceType" ) {
+ 					$deviceType = $value;
+ 					if( $value == "tablet" ) {
+ 						$isTablet = 1;
+ 					}
+ 					else {
+ 						$isTablet = 0;
+ 					}
+ 				}
+			}
+		}
+	}
+	
+	return $deviceType;
+ }
+
+function deviceTypeIsTablet($deviceType)
+{
+	return $deviceType == "tablet";
+}
+
+function getPlatformFromEnvironment($env)
+{
+	$platform = "iOS";
+ 	$queryString = $env["QUERY_STRING"];
+	if( isset($queryString) ) {
+		$queryParams = explode("&", $queryString);
+		foreach( $queryParams as $query ) {
+			$varAndValue = explode("=", $query);
+			if( sizeof($varAndValue) == 2 ) {
+				$key = $varAndValue[0];
+ 				$value = $varAndValue[1];
+ 				if( $key == "platform" ) {
+ 					$platform = $value;
+ 				}
+			}
+		}
+	}
+	
+	return $platform;
+}
 
 // Issues List
 // *Retrieves a list of available issues for the App ID, for population of Baker Shelf
@@ -205,6 +264,12 @@ $app->get('/issues/:app_id/:user_id', function ($app_id, $user_id)
 	$result = $db->query("SELECT ISSUE_DOWNLOAD_SECURITY FROM PUBLICATION WHERE APP_ID = '$app_id' LIMIT 0, 1");	
 	$issueDownloadSecurity = $result->fetchColumn();
 	
+	global $app;
+	$deviceType = getDeviceTypeFromEnvironment($app->environment());
+	$isTablet = deviceTypeIsTablet($deviceType);
+	$platform = getPlatformFromEnvironment($app->environment());
+	$isAndroid = isset($platform) && $platform == 'Android';
+
 	if(isInDevelopmentMode($app_id)=="TRUE"){logMessage(LogType::Info,"Retrieving Issues for APP ID: " . $app_id . " USER ID: " . $user_id);}
 	
 	// Query all issues for the incoming APP_ID
@@ -221,15 +286,27 @@ $app->get('/issues/:app_id/:user_id', function ($app_id, $user_id)
 			$IssuesArray[$i]['cover'] = $row['COVER'];
 			
 			if ($issueDownloadSecurity == "TRUE") {
-				
-				$IssuesArray[$i]['url'] = "http://" . $_SERVER['HTTP_HOST'] . $SCRIPT_LOCATION . "issue/" . $app_id . "/" . $user_id . "/" . $row['NAME'];
+				$IssuesArray[$i]['url'] = "http://" . $_SERVER['HTTP_HOST'] . $SCRIPT_LOCATION . "issue/" . $app_id . "/" . $user_id . "/" . $row['NAME'] . "?deviceType=" . $deviceType;
 			}
 			else{
-				$IssuesArray[$i]['url'] = $row['URL'];
+				$url = "";
+ 				if( $isTablet == 1 ) {
+ 					$url = $row['URL'];
+ 				}
+ 				else {
+ 					$url = $row['URL_ALT'];
+ 				}
+				$IssuesArray[$i]['url'] = $url;
 			}
+						
 			if($row['PRICING'] != 'free')
 			{
-				$IssuesArray[$i]['product_id'] = $row['PRODUCT_ID'];
+				if( $isAndroid == true ) {
+					$IssuesArray[$i]['product_id'] = $row['ANDROID_PRODUCT_ID'];
+				}
+				else {
+					$IssuesArray[$i]['product_id'] = $row['PRODUCT_ID'];
+				}
 			}
 			$i++;
 		}
@@ -248,6 +325,7 @@ $app->get('/issues/:app_id/:user_id', function ($app_id, $user_id)
 // *Validates availability of download of a specific named issue, redirects to download if available
 $app->get('/issue/:app_id/:user_id/:name', function ($app_id, $user_id, $name) use($app)
 {
+
 	global $dbContainer;
 	$db = $dbContainer['db'];
 
@@ -262,9 +340,10 @@ $app->get('/issue/:app_id/:user_id/:name', function ($app_id, $user_id, $name) u
 				header('HTTP/1.1 404 Not Found');
 				die();
 			}
-	
+
 			// Retrieve issue Issue Product ID to cross check with purchases
 			$product_id = $issue['PRODUCT_ID'];
+			$android_product_id = $issue['ANDROID_PRODUCT_ID'];
 
 			// Default to not allow download.		
 			$allow_download = false;
@@ -273,23 +352,30 @@ $app->get('/issue/:app_id/:user_id/:name', function ($app_id, $user_id, $name) u
 			if ($product_id && $issue['PRICING'] != 'free') {
 				// Allow download if the issue is marked as purchased
 				$result = $db->query("SELECT COUNT(*) FROM PURCHASES 
-													WHERE APP_ID = '$app_id' AND USER_ID = '$user_id' AND PRODUCT_ID = '$product_id'");		
+													WHERE APP_ID = '$app_id' AND USER_ID = '$user_id' AND (PRODUCT_ID = '$product_id' OR PRODUCT_ID = '$android_product_id')");		
 														
 				$allow_download = ($result->fetchColumn() > 0);
 			} else if ($issue['PRICING'] == 'free') {
 				// Issue is marked as free, allow download
 				$allow_download = true;
 			}
-		
+
 			if ($allow_download) {
 				
 				if((isInDevelopmentMode($app_id)=="TRUE") && !($app->request()->isHead())){logMessage(LogType::Info,"Downloading ISSUE: " . $name . " for APP ID: " . $app_id . " USER ID: " . $user_id);}
 				
 				logAnalyticMetric(AnalyticType::ApiInteraction,1,NULL,$app_id,$user_id);
 				if(!($app->request()->isHead())){logAnalyticMetric(AnalyticType::Download,1,$name,$app_id,$user_id);}
-				
+
+				global $app;
+				$deviceType = getDeviceTypeFromEnvironment($app->environment());
+				$isTablet = deviceTypeIsTablet($deviceType);
+				$url = $issue['URL'];
+ 				if( $isTablet != 1 && strlen($issue['URL_ALT']) > 0 ) {
+ 					$url = $issue['URL_ALT'];
+ 				}
 				// Redirect to the downloadable file, nothing else needed in API call
-				$app->response()->redirect($issue['URL'], 303);
+				$app->response()->redirect($url, 303);
 			}
 			else {
 				header('HTTP/1.1 403 Forbidden');
@@ -310,15 +396,33 @@ $app->get('/purchases/:app_id/:user_id', function ($app_id, $user_id)
 	$db = $dbContainer['db'];
 	$purchased_product_ids = array();
 	
+	global $app;
+	$deviceType = getDeviceTypeFromEnvironment($app->environment());
+	$isTablet = deviceTypeIsTablet($deviceType);
+	$platform = getPlatformFromEnvironment($app->environment());
+	$isAndroid = isset($platform) && $platform == 'Android';
+	
 	if(isInDevelopmentMode($app_id)=="TRUE"){logMessage(LogType::Info,"Checking purchases for APP ID: " . $app_id . " USER ID: " . $user_id);}
 				
 	try {
 		$subscribed = false;
+		
+		// Android application setup
+		$sql = "SELECT ANDROID_APP_KEY, ANDROID_CLIENT_ID, ANDROID_CLIENT_SECRET, ANDROID_REFRESH_TOKEN FROM PUBLICATION WHERE APP_ID = '$app_id' LIMIT 0, 1";
+		$clientID = null;
+		$clientSecret = null;
+		$refreshToken = null;
+		$public_key_base64 = null;
+		foreach($db->query($sql) as $row) {
+			$clientID = $row['ANDROID_CLIENT_ID'];
+			$clientSecret = $row['ANDROID_CLIENT_SECRET'];
+			$refreshToken = $row['ANDROID_REFRESH_TOKEN'];
+			$public_key_base64 = $row['ANDROID_APP_KEY'];
+		}
 
 		// Retrieve latest receipt for Auto-Renewable-Subscriptions for the APP_ID, USER_ID combination
-		$result = $db->query("SELECT BASE64_RECEIPT FROM RECEIPTS
-									     WHERE APP_ID = '$app_id' AND USER_ID = '$user_id' AND TYPE = 'auto-renewable-subscription'
-									     ORDER BY TRANSACTION_ID DESC LIMIT 0, 1");
+		$sql = "SELECT BASE64_RECEIPT FROM RECEIPTS WHERE APP_ID = '$app_id' AND USER_ID = '$user_id' AND TYPE = 'auto-renewable-subscription' ORDER BY TRANSACTION_ID DESC LIMIT 0, 1";
+		$result = $db->query($sql);
 		
 		$base64_latest_receipt = $result->fetchColumn();
 		if($base64_latest_receipt)
@@ -334,23 +438,51 @@ $app->get('/purchases/:app_id/:user_id', function ($app_id, $user_id)
 			// Only refresh and re-verify receipt if greater than the iTunesCachingDuration - or greater than 1 whole day
 			if ((getiTunesCachingDuration($app_id) == -1) || ($interval->format('%h') > getiTunesCachingDuration($app_id)) || ($interval->format('%a') > 1)) {
 				// Check the latest receipt from the subscription table
-	
-				if ($base64_latest_receipt) {		
-					// Verify Receipt - with logic to fall back to Sandbox test if Production Receipt fails (error code 21007)
-                try{
-                        $data = verifyReceipt($base64_latest_receipt, $app_id, $user_id);
-                }
-                catch(Exception $e) {
-                        if($e->getCode() == "21007"){
-                                logMessage(LogType::Info,"Confirming purchase for APP ID - Sandbox Receipt used in Production, retrying against Sandbox iTunes API: " . $app_id . " USER ID: " . $user_id . " TYPE: " . $type);
-                                $data = verifyReceipt($base64_latest_receipt, $app_id, $user_id, TRUE);
-                    }
-                }    
+				if ($base64_latest_receipt) {
+					if( $isAndroid == 1 ) {
 
-					markIssuesAsPurchased($data, $app_id, $user_id);
-	
-					// Check if there is an active subscription for the user.  Status=0 is true.
-					$subscribed = ($data->status == 0);
+					 	$billInfo = json_decode($base64_latest_receipt);
+						$accessToken = androidGetAccessToken($clientID, $clientSecret, $refreshToken);;
+						if( $accessToken != null ) {
+							$lPackageNameStr = $billInfo->packageName;
+							$pProductIdStr = $billInfo->productId;
+							$purchaseToken = $billInfo->purchaseToken;
+							$purchaseTokenEncoded = urlencode($purchaseToken);
+							$outReceiptConfirmationJSON = validateSubscriptionWithGoogle($lPackageNameStr, $pProductIdStr, $purchaseTokenEncoded, $accessToken);
+							if( $outReceiptConfirmationJSON != null ) {
+								markIssuesAsPurchasedAndroid($outReceiptConfirmationJSON,$app_id,$user_id);
+								$endDate = new DateTime( gmdate('Y-m-d H:i:s.', $outReceiptConfirmationJSON->validUntilTimestampMsec/1000.0) );
+							
+								if ($dateCurrent > $dateExpiration) {
+									$subscribed = false;
+								}
+								else {
+									$subscribed = true;
+								}
+							}
+						}
+						else {
+							$m = 'Could not get Android access token for clientID=' . $clientID . ', androidClientSecret=' . $clientSecret . ', refreshToken=' . $refreshToken;
+							logMessage(LogType::Error, $m);
+							echo '{"error":{"text":"' . $m . '"}}';
+						}
+					}
+					else {
+						// Verify Receipt - with logic to fall back to Sandbox test if Production Receipt fails (error code 21007)
+						try{
+							$data = verifyReceipt($base64_latest_receipt, $app_id, $user_id);
+						}
+						catch(Exception $e) {
+							if($e->getCode() == "21007"){
+								logMessage(LogType::Info,"Confirming purchase for APP ID - Sandbox Receipt used in Production, retrying against Sandbox iTunes API: " . $app_id . " USER ID: " . $user_id . " TYPE: " . $type);
+								$data = verifyReceipt($base64_latest_receipt, $app_id, $user_id, TRUE);
+							}
+						}
+						markIssuesAsPurchased($data, $app_id, $user_id);
+						
+						// Check if there is an active subscription for the user.  Status=0 is true.
+						$subscribed = ($data->status == 0);
+          }
 				}
 				else {
 					// There is no receipt for this user, there is no active subscription
@@ -446,11 +578,90 @@ $app->get('/itunes/:app_id', function ($app_id)
 		}
 		$AtomXML.= "</feed>";
 		
-		logAnalyticMetric(AnalyticType::ApiInteraction,1,NULL,$app_id,NULL);
+		logAnalyticMetric(AnalyticType::ApiInteraction,1,NULL,$app_id,$user_id);
 		
 		echo utf8_encode($AtomXML);
 	}
 	catch(Exception $e) {
+		logMessage(LogType::Error, $e->getMessage());
+		echo '{"error":{"text":"' . $e->getMessage() . '"}}';
+	}
+});
+
+// Confirm Purchase
+// *Confirms the purchase by validating the Receipt_Data received for the in app purchase.  Records the receipt data
+//  in the database and adds the available issues to the user's Purchased List
+$app->post('/confirmpurchaseandroid/:app_id/:user_id', function ($app_id, $user_id) use($app)
+{
+	global $dbContainer;
+	$db = $dbContainer['db'];
+	
+	$body = $app->request()->getBody();
+ 	$receiptdataBase64 = $app->request()->post('receipt_data');
+ 	$receiptdata = base64_decode($receiptdataBase64);
+ 	$signatureBase64 = $app->request()->post('signature');
+ 	$type = $app->request()->post('type');
+
+	if(isInDevelopmentMode($app_id)=="TRUE"){logMessage(LogType::Info,"Confirming android purchase for APP ID: " . $app_id . " USER ID: " . $user_id . " TYPE: " . $type);}
+
+	$didVerify = 0;
+	
+	try {
+			$receiptConfirmationJSON = null;
+			$didVerify = verifyReceiptGooglePlay($receiptdata, $receiptdataBase64, $app_id, $user_id, $signatureBase64, $type, $receiptConfirmationJSON);
+	
+			if( $didVerify != 0 && $receiptConfirmationJSON != null ) {
+			
+		 	$receiptJSON = json_decode($receiptdata);
+
+			$sql = "INSERT IGNORE INTO RECEIPTS (PLATFORM, APP_ID, PRODUCT_ID, TYPE, TRANSACTION_ID, USER_ID, PURCHASE_DATE, 
+							BASE64_RECEIPT, BASE64_ANDROID_SIGNATURE, ANDROID_DEVELOPER_PAYLOAD, ANDROID_PURCHASE_TOKEN) 
+							VALUES (:app_platform, :app_id, :product_id, :type, :transaction_id, :user_id, :purchase_date, :base64_receipt, :base64_android_signature, :android_developer_payload, :android_purchase_token)";
+			try {
+				$quantity = "1";
+				$objNull = null;
+				$platform = "2";
+				
+				$stmt = $db->prepare($sql);
+				$stmt->bindParam("app_platform", $platform);
+				$stmt->bindParam("app_id", $app_id);
+// 				$stmt->bindParam("quantity", $quantity); // test it!
+				$stmt->bindParam("product_id", $receiptJSON->productId);
+				$stmt->bindParam("type", $type);
+				$stmt->bindParam("transaction_id", $receiptJSON->orderId);
+				$stmt->bindParam("user_id", $user_id);
+				$stmt->bindParam("purchase_date", gmdate("Y-m-d\TH:i:s\Z", $receiptJSON->purchaseTime/1000.0));
+// 				$stmt->bindParam("original_transaction_id", $objNull);
+// 				$stmt->bindParam("original_purchase_date", $objNull);
+// 				$stmt->bindParam("app_item_id", $objNull);
+// 				$stmt->bindParam("version_external_identifier", $objNull);
+// 				$stmt->bindParam("bid", $objNull);
+// 				$stmt->bindParam("bvrs", $objNull);
+				$stmt->bindParam("base64_receipt", $receiptdata);
+				$stmt->bindParam("base64_android_signature", $signatureBase64);
+				$stmt->bindParam("android_developer_payload", $receiptJSON->developerPayload);
+				$stmt->bindParam("android_purchase_token", $receiptJSON->purchaseToken);
+				$r = $stmt->execute();
+
+				// If successful, record the user's purchase
+
+				if($type == 'auto-renewable-subscription'){
+					markIssuesAsPurchasedAndroid($receiptConfirmationJSON,$app_id,$user_id);
+				}else if($type == 'issue'){
+					markIssueAsPurchased($receiptJSON->productId, $app_id, $user_id);				
+				}else if($type == 'free-subscription'){
+					// Nothing to do, as the server assumes free subscriptions don't need to be handled in this way			
+				}				
+
+				logAnalyticMetric(AnalyticType::ApiInteraction,1,NULL,$app_id,$user_id);
+		}
+		catch(PDOException $e) {
+			logMessage(LogType::Error, $e->getMessage());
+			echo '{"error":{"text":"' . $e->getMessage() . '"}}';
+		}
+		}
+	}
+	catch( Exception $e ) {
 		logMessage(LogType::Error, $e->getMessage());
 		echo '{"error":{"text":"' . $e->getMessage() . '"}}';
 	}
@@ -470,66 +681,57 @@ $app->post('/confirmpurchase/:app_id/:user_id', function ($app_id, $user_id) use
 	
 	if(isInDevelopmentMode($app_id)=="TRUE"){logMessage(LogType::Info,"Confirming purchase for APP ID: " . $app_id . " USER ID: " . $user_id . " TYPE: " . $type);}
 	
+	
 	try {
-		// Verify Receipt - with logic to fall back to Sandbox test if Production Receipt fails (error code 21007)
-		try{
-		       $iTunesReceiptInfo = verifyReceipt($receiptdata, $app_id, $user_id);
-		}
-		catch(Exception $e) {
-		       if($e->getCode() == "21007"){
-		               logMessage(LogType::Info,"Confirming purchase for APP ID - Sandbox Receipt used in Production, retrying against Sandbox iTunes API: " . $app_id . " USER ID: " . $user_id . " TYPE: " . $type);
-		               $iTunesReceiptInfo = verifyReceipt($receiptdata, $app_id, $user_id, TRUE);
-		   }
-		}   
+		 // Verify Receipt - with logic to fall back to Sandbox test if Production Receipt fails (error code 21007)
+       try{
+
+               $iTunesReceiptInfo = verifyReceipt($receiptdata, $app_id, $user_id);
+       }
+       catch(Exception $e) {
+               if($e->getCode() == "21007"){
+                       logMessage(LogType::Info,"Confirming purchase for APP ID - Sandbox Receipt used in Production, retrying against Sandbox iTunes API: " . $app_id . " USER ID: " . $user_id . " TYPE: " . $type);
+                       $iTunesReceiptInfo = verifyReceipt($receiptdata, $app_id, $user_id, TRUE);
+           }
+       }   
 		
 		$sql = "INSERT IGNORE INTO RECEIPTS (APP_ID, QUANTITY, PRODUCT_ID, TYPE, TRANSACTION_ID, USER_ID, PURCHASE_DATE, 
 	 		    			ORIGINAL_TRANSACTION_ID, ORIGINAL_PURCHASE_DATE, APP_ITEM_ID, VERSION_EXTERNAL_IDENTIFIER, BID, BVRS, BASE64_RECEIPT) 
 	 		    			VALUES (:app_id, :quantity, :product_id, :type, :transaction_id, :user_id, :purchase_date, :original_transaction_id,
 	 		    					  :original_purchase_date, :app_item_id, :version_external_identifier, :bid, :bvrs, :base64_receipt)";
-	    // Jailbroken Device Hack Check
-	    // Jailbroken devices often try to spoof purchases by using fake receipts
-	    // Compare expected APP_ID to the Receipt (BID) Bundle Identifier.
-	    if($app_id == $iTunesReceiptInfo->receipt->bid)
-	    {
-			try {
-				$stmt = $db->prepare($sql);
-				$stmt->bindParam("app_id", $app_id);
-				$stmt->bindParam("quantity", $iTunesReceiptInfo->receipt->quantity);
-				$stmt->bindParam("product_id", $iTunesReceiptInfo->receipt->product_id);
-				$stmt->bindParam("type", $type);
-				$stmt->bindParam("transaction_id", $iTunesReceiptInfo->receipt->transaction_id);
-				$stmt->bindParam("user_id", $user_id);
-				$stmt->bindParam("purchase_date", $iTunesReceiptInfo->receipt->purchase_date);
-				$stmt->bindParam("original_transaction_id", $iTunesReceiptInfo->receipt->original_transaction_id);
-				$stmt->bindParam("original_purchase_date", $iTunesReceiptInfo->receipt->original_purchase_date);
-				$stmt->bindParam("app_item_id", $iTunesReceiptInfo->receipt->item_id);
-				$stmt->bindParam("version_external_identifier", $iTunesReceiptInfo->receipt->version_external_identifier);
-				$stmt->bindParam("bid", $iTunesReceiptInfo->receipt->bid);
-				$stmt->bindParam("bvrs", $iTunesReceiptInfo->receipt->bvrs);
-				$stmt->bindParam("base64_receipt", $receiptdata);
-				$stmt->execute();
-	
-				// If successful, record the user's purchase
-				if($type == 'auto-renewable-subscription'){
-					markIssuesAsPurchased($iTunesReceiptInfo,$app_id,$user_id);
-				}else if($type == 'issue'){
-					markIssueAsPurchased($iTunesReceiptInfo->receipt->product_id, $app_id, $user_id);				
-				}else if($type == 'free-subscription'){
-					// Nothing to do, as the server assumes free subscriptions don't need to be handled in this way			
-				}				
-	
-				logAnalyticMetric(AnalyticType::ApiInteraction,1,NULL,$app_id,$user_id);
-	
-			}
-			catch(PDOException $e) {
-				logMessage(LogType::Error, $e->getMessage());
-				echo '{"error":{"text":"' . $e->getMessage() . '"}}';
-			}
+		try {
+			$stmt = $db->prepare($sql);
+			$stmt->bindParam("app_id", $app_id);
+			$stmt->bindParam("quantity", $iTunesReceiptInfo->receipt->quantity);
+			$stmt->bindParam("product_id", $iTunesReceiptInfo->receipt->product_id);
+			$stmt->bindParam("type", $type);
+			$stmt->bindParam("transaction_id", $iTunesReceiptInfo->receipt->transaction_id);
+			$stmt->bindParam("user_id", $user_id);
+			$stmt->bindParam("purchase_date", $iTunesReceiptInfo->receipt->purchase_date);
+			$stmt->bindParam("original_transaction_id", $iTunesReceiptInfo->receipt->original_transaction_id);
+			$stmt->bindParam("original_purchase_date", $iTunesReceiptInfo->receipt->original_purchase_date);
+			$stmt->bindParam("app_item_id", $iTunesReceiptInfo->receipt->item_id);
+			$stmt->bindParam("version_external_identifier", $iTunesReceiptInfo->receipt->version_external_identifier);
+			$stmt->bindParam("bid", $iTunesReceiptInfo->receipt->bid);
+			$stmt->bindParam("bvrs", $iTunesReceiptInfo->receipt->bvrs);
+			$stmt->bindParam("base64_receipt", $receiptdata);
+			$stmt->execute();
+
+			// If successful, record the user's purchase
+			if($type == 'auto-renewable-subscription'){
+				markIssuesAsPurchased($iTunesReceiptInfo,$app_id,$user_id);
+			}else if($type == 'issue'){
+				markIssueAsPurchased($iTunesReceiptInfo->receipt->product_id, $app_id, $user_id);				
+			}else if($type == 'free-subscription'){
+				// Nothing to do, as the server assumes free subscriptions don't need to be handled in this way			
+			}				
+
+			logAnalyticMetric(AnalyticType::ApiInteraction,1,NULL,$app_id,$user_id);
+
 		}
-		else{
-			logMessage(LogType::Error, "Invalid Receipt Bundle Identifier: " . $iTunesReceiptInfo->receipt->bid);
-			header('HTTP/1.1 404 Not Found');
-			die();
+		catch(PDOException $e) {
+			logMessage(LogType::Error, $e->getMessage());
+			echo '{"error":{"text":"' . $e->getMessage() . '"}}';
 		}
 	}
 	catch(Exception $e) {
@@ -547,16 +749,24 @@ $app->post('/apns/:app_id/:user_id', function ($app_id, $user_id) use($app)
 	
 	$apns_token = $app->request()->post('apns_token');
 	
+	global $app;
+	$deviceType = getDeviceTypeFromEnvironment($app->environment());
+	$isTablet = deviceTypeIsTablet($deviceType);
+	$platform = getPlatformFromEnvironment($app->environment());
+	$isAndroid = isset($platform) && $platform == 'Android';
+	$platformInt = ($isAndroid == 1) ? 2 : 1;
+	
 	if(isInDevelopmentMode($app_id)=="TRUE"){logMessage(LogType::Info,"Storing APNS Token for APP ID: " . $app_id . " USER ID: " . $user_id);}
 
-	$sql = "INSERT IGNORE INTO APNS_TOKENS (APP_ID, USER_ID, APNS_TOKEN) 
- 		    			VALUES (:app_id, :user_id, :apns_token)";
+	$sql = "INSERT IGNORE INTO APNS_TOKENS (APP_ID, USER_ID, APNS_TOKEN, PLATFORM) 
+ 		    			VALUES (:app_id, :user_id, :apns_token, :platform)";
  		    			
 	try {
 		$stmt = $db->prepare($sql);
 		$stmt->bindParam("app_id", $app_id);
 		$stmt->bindParam("user_id", $user_id);
 		$stmt->bindParam("apns_token", $apns_token);
+		$stmt->bindParam("platform", $platformInt);
 		$stmt->execute();
 		
 		logAnalyticMetric(AnalyticType::ApiInteraction,1,NULL,$app_id,$user_id);
@@ -760,6 +970,85 @@ function markIssuesAsPurchased($app_store_data, $app_id, $user_id)
 	}
 }
 
+// Mark all available (paid) issues as purchased for a given user
+function markIssuesAsPurchasedAndroid($google_store_subscription_confirmation, $app_id, $user_id)
+{
+	global $dbContainer;
+	$db = $dbContainer['db'];
+	
+	if(isInDevelopmentMode($app_id)=="TRUE"){logMessage(LogType::Info,"Marking Issues as Purchased (android) for APP ID: " . $app_id . " USER ID: " . $user_id);}
+	
+	$startDate = new DateTime( gmdate('Y-m-d H:i:s.', $google_store_subscription_confirmation->initiationTimestampMsec/1000.0) );
+	$endDate = new DateTime( gmdate('Y-m-d H:i:s.', $google_store_subscription_confirmation->validUntilTimestampMsec/1000.0) );
+
+// 	var_dump( $startDate );
+// 	var_dump( $endDate );
+
+	// Now update the Purchases table with all Issues that fall within the subscription start and expiration date
+	$startDateFormatted = $startDate->format('Y-m-d H:i:s');
+	$endDateFormatted = $endDate->format('Y-m-d H:i:s');
+	
+	// Get First Day of the Month that the Receipt was generated for (Start)
+	$issuesStartDateFormatted = $startDate->format('Y-m-01 00:00:00');
+	// Get Last Day of the Month that the Receipt was generated for (Expiration)
+	$issuesEndDateFormatted = $endDate->format('Y-m-t 23:59:59');
+
+	// Update Subscriptions Table for user with current active subscription start and expiration date
+	updateSubscription($app_id, $user_id, $startDateFormatted, $endDateFormatted);
+
+// If we are in Sandbox Mode, unlock all issues by default for testing purposes	
+/*
+	if(getiTunesProductionLevel($app_id)=="sandbox"){
+
+		$result = $db->query("SELECT PRODUCT_ID FROM ISSUES
+		  							 WHERE APP_ID = '$app_id'
+		  							 AND PRICING = 'paid'");
+	}
+	else{
+*/
+		// If we are in Production - determine based on Subscription Behavior setting
+		
+		if(getSubscriptionBehavior($app_id)=="all"){
+		
+			$result = $db->query("SELECT ANDROID_PRODUCT_ID FROM ISSUES
+		  							 WHERE APP_ID = '$app_id'
+		  							 AND PRICING = 'paid'");
+	  							 
+		}else if(getSubscriptionBehavior($app_id)=="term"){
+		
+			$result = $db->query("SELECT ANDROID_PRODUCT_ID FROM ISSUES
+								WHERE APP_ID = '$app_id'
+								AND `DATE` >= '$issuesStartDateFormatted'
+								AND `DATE` <= '$issuesEndDateFormatted'
+								AND PRICING = 'paid'
+								AND AVAILABILITY = 'published'");			
+		}else{
+		
+			//Default to 'term' if for some reason the above fails
+			$result = $db->query("SELECT ANDROID_PRODUCT_ID FROM ISSUES
+								WHERE APP_ID = '$app_id'
+								AND `DATE` >= '$issuesStartDateFormatted'
+								AND `DATE` <= '$issuesEndDateFormatted'
+								AND PRICING = 'paid'
+								AND AVAILABILITY = 'published'");	
+		}
+// 	}
+
+	$product_ids_to_mark = $result->fetchAll(PDO::FETCH_COLUMN);
+	
+	$insert = "INSERT IGNORE INTO PURCHASES (APP_ID, USER_ID, PRODUCT_ID)
+						VALUES ('$app_id', '$user_id', :product_id)";
+						
+	$stmt = $db->prepare($insert);
+	
+	foreach($product_ids_to_mark as $key => $product_id) {
+		if( $product_id != null ) {
+			$stmt->bindParam('product_id', $product_id);
+			$stmt->execute();
+		}
+	}
+}
+
 // Mark all available issues as purchased for a given user
 function markIssueAsPurchased($product_id, $app_id, $user_id)
 {
@@ -835,13 +1124,15 @@ function verifyReceipt($receipt, $app_id, $user_id, $sandbox_override = FALSE)
 {
 	global $dbContainer;
 	$db = $dbContainer['db'];
-	
+
 	if(isInDevelopmentMode($app_id)=="TRUE"){logMessage(LogType::Info,"Verifying receipt with Apple for APP ID: " . $app_id . " USER ID: " . $user_id);}
 	
-	// Lookup shared secret from Publication table
-	$result = $db->query("SELECT ITUNES_SHARED_SECRET FROM PUBLICATION WHERE APP_ID = '$app_id' LIMIT 0, 1");	
-	$sharedSecret = $result->fetchColumn();
 	
+	// Lookup shared secret from Publication table
+ 	$result = $db->query("SELECT ITUNES_SHARED_SECRET FROM PUBLICATION WHERE APP_ID = '$app_id' LIMIT 0, 1");	
+ 	$sharedSecret = $result->fetchColumn();
+
+
 	if (getiTunesProductionLevel($app_id)=="sandbox" || $sandbox_override == TRUE) {
 		$endpoint = 'https://sandbox.itunes.apple.com/verifyReceipt';
 	}
@@ -860,6 +1151,7 @@ function verifyReceipt($receipt, $app_id, $user_id, $sandbox_override = FALSE)
 	}
 	
 	$ch = curl_init($endpoint);
+
 	curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
 	curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0);
 	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -886,6 +1178,168 @@ function verifyReceipt($receipt, $app_id, $user_id, $sandbox_override = FALSE)
 	}
 
 	return $data;
+}
+
+function androidGetAccessToken($clientID, $clientSecret, $refreshToken)
+{
+	$url ="https://accounts.google.com/o/oauth2/token";
+	$fields = array(
+   "client_id"=>$clientID,
+   "client_secret"=>$clientSecret,
+   "refresh_token"=>$refreshToken,
+   "grant_type"=>"refresh_token"
+	);
+
+	$ch = curl_init($url);
+	
+	//set the url, number of POST vars, POST data
+	curl_setopt($ch, CURLOPT_POST,count($fields));
+	curl_setopt($ch, CURLOPT_POSTFIELDS, $fields);
+	curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+	curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+	
+	//execute post
+	$lResponse_json = curl_exec($ch);
+	
+	//close connection
+	curl_close($ch);
+	
+ 	$accessTokenJSON = json_decode($lResponse_json);
+ 	$result = null;
+ 	if( isset($accessTokenJSON->error) ) {
+		logMessage(LogType::Error, 'Error getting access token for GooglePlay action: ' . $accessTokenJSON->error);
+		echo '{"error":{"text":"' . $accessTokenJSON->error . '"}}';
+ 	}
+ 	else {
+		$result = $accessTokenJSON->access_token;
+	}
+	
+	return $result;
+}
+
+// Validate subscription with google.
+function validateSubscriptionWithGoogle($lPackageNameStr, $pProductIdStr, $purchaseTokenEncoded, $accessToken)
+{
+	$lURLStr = "https://www.googleapis.com/androidpublisher/v1.1/applications/$lPackageNameStr/subscriptions/$pProductIdStr/purchases/$purchaseTokenEncoded";
+
+	try {				
+		$curl = curl_init($lURLStr);
+		
+		curl_setopt($curl, CURLOPT_HTTPAUTH, CURLAUTH_ANY);
+		curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
+		curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1); 
+		$curlheader[0] = "Authorization: Bearer " . $accessToken;
+		curl_setopt($curl, CURLOPT_HTTPHEADER, $curlheader);
+		
+		$json_response = curl_exec($curl);
+		curl_close($curl);
+		
+		$json_responseObj = json_decode($json_response);
+		$outReceiptConfirmationJSON = null;
+		if( isset($json_responseObj) && !isset($json_responseObj->error) ) {
+			return $json_responseObj;
+		}
+		else {
+			$m = 'Could not validate subscription with Google. JSON not satisfying: ' . $json_response;
+			logMessage(LogType::Error, $m);
+			echo '{"error":{"text":"' . $m . '"}}';
+			return null;
+		}
+	}
+	catch( Exception $e ) {
+		$m = 'Could not validate subscription with google: ' . $e->getMessage();
+		logMessage(LogType::Error, $m);
+		echo '{"error":{"text":"' . $m . '"}}';
+	}
+	
+	return null;
+}
+
+// Validate Google Play Purchase Receipt, by checking signature
+// check http://stackoverflow.com/questions/12427479/am-i-getting-the-steps-right-for-verifying-a-users-android-in-app-subscription
+function verifyReceiptGooglePlay($receiptdata, $receiptdataBase64, $app_id, $user_id, $sigdata, $subscriptionType, &$outReceiptConfirmationJSON)
+{
+	global $dbContainer;
+	$db = $dbContainer['db'];
+
+	// Android application setup
+	$sql = "SELECT ANDROID_APP_KEY, ANDROID_CLIENT_ID, ANDROID_CLIENT_SECRET, ANDROID_REFRESH_TOKEN FROM PUBLICATION WHERE APP_ID = '$app_id' LIMIT 0, 1";
+	$clientID = null;
+	$clientSecret = null;
+	$refreshToken = null;
+	$public_key_base64 = null;
+	foreach($db->query($sql) as $row) {
+		$clientID = $row['ANDROID_CLIENT_ID'];
+		$clientSecret = $row['ANDROID_CLIENT_SECRET'];
+		$refreshToken = $row['ANDROID_REFRESH_TOKEN'];
+		$public_key_base64 = $row['ANDROID_APP_KEY'];
+	}
+	
+	if( !(isset($public_key_base64) && strlen($public_key_base64) > 0) ) {
+		$m = 'public_key_base64 not set for publication ' . $app_id;
+		logMessage(LogType::Error, $m);
+		echo '{"error":{"text":"' . $m . '"}}';
+		return 0;
+	}
+
+	// Check signature. We do this for all type of purchases. This is the first line of defense.
+ 	$billInfo = json_decode($receiptdata);
+ 	$signature = base64_decode($sigdata);
+	$key =  "-----BEGIN PUBLIC KEY-----\n".
+  	      chunk_split($public_key_base64, 64,"\n").
+    	   '-----END PUBLIC KEY-----';
+    	   
+	$key = openssl_get_publickey($key);
+	$singatureValidated = 0;
+	try {  
+		$singatureValidated = openssl_verify($receiptdata, $signature, $key);
+	} catch (Exception $e) {  
+		var_dump( $e->getMessage() );
+	}
+	
+	if( $singatureValidated == 1 ) {
+		// Get access token so we can check the subscription
+		if($subscriptionType == 'auto-renewable-subscription' ){
+			if( !(isset($clientID) && strlen($clientID) > 0) ) {
+				$m = 'Client id not set for publication ' . $app_id;
+				logMessage(LogType::Error, $m);
+				echo '{"error":{"text":"' . $m . '"}}';
+				return 0;
+			}
+			if( !(isset($clientSecret) && strlen($clientSecret) > 0) ) {
+				$m = 'clientSecret not set for publication ' . $app_id;
+				logMessage(LogType::Error, $m);
+				echo '{"error":{"text":"' . $m . '"}}';
+				return 0;
+			}
+			if( !(isset($refreshToken) && strlen($refreshToken) > 0) ) {
+				$m = 'refreshToken not set for publication ' . $app_id;
+				logMessage(LogType::Error, $m);
+				echo '{"error":{"text":"' . $m . '"}}';
+				return 0;
+			}
+			
+			$accessToken = androidGetAccessToken($clientID, $clientSecret, $refreshToken);
+			if( $accessToken != null ) {
+				// Verify subscription against google's servers.
+				$lPackageNameStr = $billInfo->packageName;
+				$pProductIdStr = $billInfo->productId;
+				$purchaseToken = $billInfo->purchaseToken;
+				$purchaseTokenEncoded = urlencode($purchaseToken);
+
+				$outReceiptConfirmationJSON = validateSubscriptionWithGoogle($lPackageNameStr, $pProductIdStr, $purchaseTokenEncoded, $accessToken);
+			} // if accessToken
+		} // if $singatureValidated
+	}
+	else {
+		$m = 'Receit could not be validated against signature. Receit=' . $receiptdata . ' signature=' . $sigdata;
+		logMessage(LogType::Error, $m);
+		echo '{"error":{"text":"' . $m . '"}}';
+		return 0;
+	}
+	
+	return 1;
 }
 
 /**
